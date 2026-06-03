@@ -8,7 +8,19 @@
 // Права: tasks, sonet_group
 $inboundWebhook = "https://b24-76mjtz.bitrix24.ru/rest/1/a3zrzighzyvakfqc/";
 // =============================================
+// Функция для логирования
+function writeLog($message) {
+    $logFile = __DIR__ . "/bitrix_handler_log.txt";
+    $timestamp = date("Y-m-d H:i:s");
+    file_put_contents($logFile, "[$timestamp] $message" . PHP_EOL, FILE_APPEND);
+}
 
+// Логируем сам факт вызова скрипта
+writeLog("Скрипт был вызван");
+
+// Логируем все входящие данные
+$rawInput = file_get_contents("php://input");
+writeLog("Получен RAW запрос: " . $rawInput);
 // Лог-файл (будет создан в той же папке, что и скрипт)
 $logFile = __DIR__ . "/bitrix_handler_log.txt";
 
