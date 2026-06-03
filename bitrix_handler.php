@@ -2,48 +2,34 @@
 // bitrix_handler.php
 // Обработчик исходящего вебхука для события OnTaskAdd
 
-// ========== НАСТРОЙТЕ ЭТУ ПЕРЕМЕННУЮ ==========
-// Вместо текста ниже вставьте URL вашего ВХОДЯЩЕГО вебхука из Битрикс24
-// Как его создать: Приложения → Разработчикам → Входящие вебхуки → Добавить
-// Права: tasks, sonet_group
-$inboundWebhook = "https://b24-76mjtz.bitrix24.ru/rest/1/a3zrzighzyvakfqc/";
-// =============================================
-// Функция для логирования
-function writeLog($message) {
-    $logFile = __DIR__ . "/bitrix_handler_log.txt";
-    $timestamp = date("Y-m-d H:i:s");
-    file_put_contents($logFile, "[$timestamp] $message" . PHP_EOL, FILE_APPEND);
-}
-
-// Логируем сам факт вызова скрипта
-writeLog("Скрипт был вызван");
-
-// Логируем все входящие данные
-$rawInput = file_get_contents("php://input");
-writeLog("Получен RAW запрос: " . $rawInput);
-// Лог-файл (будет создан в той же папке, что и скрипт)
+// --- НАСТРОЙКИ (ПРОВЕРЬТЕ ЭТИ ДАННЫЕ!) ---
+// URL входящего вебхука из вашего Битрикс24 (с правами tasks, sonet_group)
+$inboundWebhook = "https://b24-76mjtz.bitrix24.ru/rest/1/6yp45wovcl3yabiy/";
+// Папка для логов (должна быть доступна на запись)
 $logFile = __DIR__ . "/bitrix_handler_log.txt";
+// -------------------------------------
 
+// Функция writeLog объявлена только один раз
 function writeLog($message, $logFile) {
     $timestamp = date("Y-m-d H:i:s");
     file_put_contents($logFile, "[$timestamp] $message" . PHP_EOL, FILE_APPEND);
 }
 
-// 1. Принимаем данные от Битрикс24
+// 1. Принимаем и декодируем входящий JSON от Битрикс24
 $rawInput = file_get_contents("php://input");
-writeLog("Получен запрос: " . $rawInput, $logFile);
+writeLog("Скрипт выполнен. Получен сырой запрос: " . $rawInput, $logFile);
 
 $data = json_decode($rawInput, true);
 if (!$data) {
-    writeLog("Ошибка: не JSON", $logFile);
+    writeLog("Ошибка: не удалось декодировать JSON", $logFile);
     http_response_code(200);
     echo "OK";
     exit;
 }
 
-// 2. Проверяем, что это событие OnTaskAdd
+// 2. Проверяем, что это событие OnTaskAdd и есть ID задачи
 if (!isset($data['event']) || $data['event'] !== 'OnTaskAdd') {
-    writeLog("Не событие OnTaskAdd, игнорируем", $logFile);
+    writeLog("Неизвестное событие: " . ($data['event'] ?? 'null'), $logFile);
     http_response_code(200);
     echo "OK";
     exit;
@@ -51,19 +37,19 @@ if (!isset($data['event']) || $data['event'] !== 'OnTaskAdd') {
 
 $taskId = $data['data']['FIELDS']['ID'] ?? null;
 if (!$taskId) {
-    writeLog("Нет ID задачи", $logFile);
+    writeLog("В событии нет ID задачи", $logFile);
     http_response_code(200);
     echo "OK";
     exit;
 }
 
-writeLog("Начинаем обработку задачи ID: " . $taskId, $logFile);
+writeLog("Обработка задачи ID: " . $taskId, $logFile);
 
-// 3. Получаем детали задачи через REST
+// 3. Получаем детали задачи через входящий вебхук
 $getTaskUrl = $inboundWebhook . "tasks.task.get";
 $postData = http_build_query([
     'taskId' => $taskId,
-    'select' => ['ID', 'TITLE', 'DESCRIPTION']
+    'select' => ['ID', 'TITLE', 'DESCRIPTION', 'RESPONSIBLE_ID']
 ]);
 
 $ch = curl_init();
@@ -79,8 +65,8 @@ $response = curl_exec($ch);
 $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 
-if ($httpCode != 200 || !$response) {
-    writeLog("Ошибка получения задачи: HTTP $httpCode", $logFile);
+if ($httpCode !== 200 || !$response) {
+    writeLog("Ошибка при получении задачи: HTTP $httpCode, ответ: $response", $logFile);
     http_response_code(200);
     echo "OK";
     exit;
@@ -88,7 +74,7 @@ if ($httpCode != 200 || !$response) {
 
 $taskData = json_decode($response, true);
 if (!isset($taskData['result']['task'])) {
-    writeLog("Задача не найдена: " . $response, $logFile);
+    writeLog("Не удалось найти задачу: " . $response, $logFile);
     http_response_code(200);
     echo "OK";
     exit;
@@ -98,16 +84,16 @@ $task = $taskData['result']['task'];
 $taskTitle = $task['TITLE'];
 $taskDesc = $task['DESCRIPTION'] ?? '';
 
-writeLog("Создаём проект с названием: $taskTitle", $logFile);
+writeLog("Название задачи: $taskTitle", $logFile);
 
-// 4. Создаём проект (группу)
+// 4. Создаём проект (группу) через sonet_group.create
 $createGroupUrl = $inboundWebhook . "sonet_group.create";
 $groupFields = [
     'NAME' => $taskTitle,
     'DESCRIPTION' => $taskDesc,
-    'PROJECT' => 'Y',
-    'VISIBLE' => 'Y',
-    'OPENED' => 'Y'
+    'PROJECT' => 'Y',          // Это именно проект
+    'VISIBLE' => 'Y',          // Видим всем
+    'OPENED' => 'Y',           // Открытый
 ];
 $postDataGroup = http_build_query(['fields' => $groupFields]);
 
@@ -127,15 +113,16 @@ curl_close($chGroup);
 if ($groupHttpCode == 200) {
     $groupResult = json_decode($groupResponse, true);
     if (isset($groupResult['result'])) {
-        writeLog("✅ Проект создан! ID группы: " . $groupResult['result'], $logFile);
+        writeLog("✅ Проект успешно создан. ID: " . $groupResult['result'], $logFile);
     } else {
         $error = $groupResult['error_description'] ?? $groupResult['error'] ?? 'неизвестная ошибка';
-        writeLog("❌ Ошибка API: $error", $logFile);
+        writeLog("❌ Ошибка API при создании проекта: $error. Ответ: $groupResponse", $logFile);
     }
 } else {
-    writeLog("❌ HTTP ошибка $groupHttpCode: $groupResponse", $logFile);
+    writeLog("❌ HTTP ошибка при создании проекта: $groupHttpCode, ответ: $groupResponse", $logFile);
 }
 
-// 5. Обязательный ответ 200
+// 5. Отвечаем Битрикс24, что всё принято (обязательно HTTP 200)
 http_response_code(200);
 echo "OK";
+?>
